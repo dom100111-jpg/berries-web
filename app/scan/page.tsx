@@ -39,10 +39,23 @@ type VerifyResponse = {
   error?: string;
 };
 
+function normalizeToken(value: string) {
+  const trimmed = value.trim();
+
+  if (trimmed.includes("/transit/pass/")) {
+    const part = trimmed.split("/transit/pass/")[1] ?? "";
+    return part.split("?")[0].split("#")[0].trim();
+  }
+
+  return trimmed;
+}
+
 export default function ScanPage() {
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VerifyResponse | null>(null);
+  const [updatingDocId, setUpdatingDocId] = useState<string | null>(null);
+const [actionMessage, setActionMessage] = useState("");
 
   const badgeText = useMemo(() => {
     if (!result) return "READY TO SCAN";
@@ -60,13 +73,15 @@ export default function ScanPage() {
       setLoading(true);
       setResult(null);
 
+      const cleaned = normalizeToken(token);
+
       const res = await fetch("/api/scan/verify", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          token,
+          token: cleaned,
           scan_mode: "airport",
           verifier_type: "airport_staff",
         }),
@@ -83,7 +98,84 @@ export default function ScanPage() {
       setLoading(false);
     }
   };
+ const updateDocumentStatus = async (
+  documentId: string,
+  verified: boolean
+) => {
+  try {
+    setUpdatingDocId(documentId);
+    setActionMessage("");
 
+    const res = await fetch("/api/scan/document-verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        documentId,
+        status: verified ? "verified" : "pending",
+      }),
+    });
+
+    const json = await res.json();
+
+    if (!res.ok || !json.ok) {
+      setActionMessage(json.error || "Failed to update document.");
+      return;
+    }
+
+    setResult((prev) => {
+      if (!prev || !prev.documents) return prev;
+
+      const updatedDocuments = prev.documents.map((doc) =>
+        doc.id === documentId
+          ? { ...doc, verified }
+          : doc
+      );
+
+      const hasVerifiedType = (type: string) =>
+        updatedDocuments.some(
+          (doc) =>
+            (doc.document_type ?? "").toLowerCase() === type &&
+            doc.verified === true
+        );
+
+      const readiness = {
+        passport: hasVerifiedType("passport"),
+        visa: hasVerifiedType("visa"),
+        ticket: hasVerifiedType("ticket"),
+        hotel_booking: hasVerifiedType("hotel_booking"),
+        vaccination: hasVerifiedType("vaccination"),
+      };
+
+      const minimumReady =
+        readiness.passport &&
+        readiness.ticket &&
+        readiness.hotel_booking;
+
+      return {
+        ...prev,
+        documents: updatedDocuments,
+        readiness,
+        verified: minimumReady,
+        status: minimumReady ? "VERIFIED" : "REVIEW_REQUIRED",
+        message: minimumReady
+          ? "Transit pass is active and required documents are available."
+          : "Transit pass is active, but required documents are missing.",
+      };
+    });
+
+    setActionMessage(
+      verified
+        ? "Document marked as verified."
+        : "Document marked as pending."
+    );
+  } catch (error) {
+    setActionMessage("Something went wrong while updating document.");
+  } finally {
+    setUpdatingDocId(null);
+  }
+};
   return (
     <main style={pageStyle}>
       <div style={shellStyle}>
@@ -127,6 +219,18 @@ export default function ScanPage() {
           <p style={hintStyle}>
             Example: berries-transit-1773675828035-pk8g79g0
           </p>
+          {actionMessage ? (
+  <p
+    style={{
+      marginTop: 10,
+      color: "#374151",
+      fontSize: 14,
+      fontWeight: 700,
+    }}
+  >
+    {actionMessage}
+  </p>
+) : null}
         </section>
 
         {result ? (
@@ -225,29 +329,70 @@ export default function ScanPage() {
                   <h3 style={subTitleStyle}>Linked Documents</h3>
 
                   {!result.documents || result.documents.length === 0 ? (
-                    <div style={emptyStyle}>No linked documents found.</div>
-                  ) : (
-                    <div style={docListStyle}>
-                      {result.documents.map((doc) => (
-                        <div key={doc.id} style={docCardStyle}>
-                          <div style={docTitleStyle}>
-                            {(doc.document_type ?? "document").replace("_", " ")}
-                          </div>
-                          <div style={docFileStyle}>
-                            {doc.file_name ?? "Unnamed file"}
-                          </div>
-                          <div
-                            style={{
-                              ...docVerifyStyle,
-                              color: doc.verified ? "#166534" : "#b45309",
-                            }}
-                          >
-                            {doc.verified ? "Verified" : "Pending verification"}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+  <div style={emptyStyle}>No linked documents found.</div>
+) : (
+  <div style={docListStyle}>
+    {result.documents.map((doc) => (
+      <div key={doc.id} style={docCardStyle}>
+        <div>
+          <div style={docTitleStyle}>
+            {(doc.document_type ?? "document").replace("_", " ")}
+          </div>
+          <div style={docFileStyle}>
+            {doc.file_name ?? "Unnamed file"}
+          </div>
+          <div
+            style={{
+              ...docVerifyStyle,
+              color: doc.verified ? "#166534" : "#b45309",
+            }}
+          >
+            {doc.verified ? "Verified" : "Pending verification"}
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+          }}
+        >
+          <button
+            onClick={() => updateDocumentStatus(doc.id, true)}
+            disabled={updatingDocId === doc.id}
+            style={{
+              ...miniButtonStyle,
+              background: "#dcfce7",
+              color: "#166534",
+              border: "1px solid #86efac",
+              cursor: updatingDocId === doc.id ? "not-allowed" : "pointer",
+              opacity: updatingDocId === doc.id ? 0.7 : 1,
+            }}
+          >
+            {updatingDocId === doc.id ? "Updating..." : "Verify"}
+          </button>
+
+          <button
+            onClick={() => updateDocumentStatus(doc.id, false)}
+            disabled={updatingDocId === doc.id}
+            style={{
+              ...miniButtonStyle,
+              background: "#fff7ed",
+              color: "#9a3412",
+              border: "1px solid #fdba74",
+              cursor: updatingDocId === doc.id ? "not-allowed" : "pointer",
+              opacity: updatingDocId === doc.id ? 0.7 : 1,
+            }}
+          >
+            {updatingDocId === doc.id ? "Updating..." : "Mark Pending"}
+          </button>
+        </div>
+      </div>
+    ))}
+  </div>
+)}
                 </div>
               </>
             )}
@@ -527,6 +672,15 @@ const docVerifyStyle: React.CSSProperties = {
   marginTop: 8,
   fontSize: 13,
   fontWeight: 800,
+};
+
+const miniButtonStyle: React.CSSProperties = {
+  height: 40,
+  borderRadius: 12,
+  padding: "0 14px",
+  fontSize: 13,
+  fontWeight: 900,
+  border: "1px solid",
 };
 
 const emptyStyle: React.CSSProperties = {

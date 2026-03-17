@@ -1,7 +1,9 @@
+import React from "react";
 import { supabase } from "@/lib/supabase";
 
 type PageProps = {
   params: Promise<{ token: string }>;
+  searchParams?: Promise<{ mode?: string }>;
 };
 
 type Trip = {
@@ -16,80 +18,140 @@ type Trip = {
 
 type TransitDocument = {
   id: string;
+  trip_id?: string | null;
   document_type: string | null;
   file_name: string | null;
   verified: boolean | null;
 };
 
-export default async function TransitPassPage({ params }: PageProps) {
-  const { token } = await params;
+function normalizeToken(value: string | null | undefined) {
+  if (!value) return null;
+  const trimmed = value.trim();
 
- const { data: rows, error } = await supabase
-  .from("transit_qr_passes")
-  .select("*")
-  .eq("qr_code_value", token)
-  .eq("is_active", true);
+  if (trimmed.includes("/transit/pass/")) {
+    const part = trimmed.split("/transit/pass/")[1] ?? "";
+    return part.split("?")[0].split("#")[0].trim() || null;
+  }
 
-const passRow = rows?.[0] ?? null;
-const isExpired =
-  passRow?.expires_at && new Date(passRow.expires_at).getTime() < Date.now();
-
-if (error || !passRow || isExpired) {
-  return (
-    <main style={pageStyle}>
-      <div style={shellStyle}>
-        <div style={invalidCardStyle}>
-          <div style={topRowStyle}>
-            <div>
-              <div style={brandStyle}>BERRIES TRANSIT</div>
-              <h1 style={titleStyle}>Transit Pass Not Found</h1>
-            </div>
-
-            <a href="/transit" style={closeButtonStyle}>
-              ✕
-            </a>
-          </div>
-
-          <p style={subtitleStyle}>
-            This QR pass is invalid, expired, or no longer active.
-          </p>
-
-          <div style={badBadgeStyle}>INVALID PASS</div>
-        </div>
-      </div>
-    </main>
-  );
+  return trimmed;
 }
 
-const scanMode = "general";
+export default async function TransitPassPage({
+  params,
+  searchParams,
+}: PageProps) {
+  const { token: rawToken } = await params;
+  const resolvedSearchParams = searchParams ? await searchParams : undefined;
+  const isAirportMode = resolvedSearchParams?.mode === "airport";
 
-await supabase.from("transit_qr_scans").insert({
-  qr_pass_id: passRow.id,
-  token,
-  scan_mode: scanMode,
-  note: "Transit pass opened from QR verification page",
-});
+  const token = normalizeToken(rawToken);
 
-const { count: scanCount } = await supabase
-  .from("transit_qr_scans")
-  .select("*", { count: "exact", head: true })
-  .eq("qr_pass_id", passRow.id);
+  if (!token) {
+    return (
+      <main style={pageStyle}>
+        <div style={shellStyle}>
+          <div style={invalidCardStyle}>
+            <div style={topRowStyle}>
+              <div>
+                <div style={brandStyle}>BERRIES TRANSIT</div>
+                <h1 style={titleStyle}>Transit Pass Not Found</h1>
+              </div>
 
-  const { data: trip } = await supabase
+              <a href={isAirportMode ? "/scan" : "/"} style={closeButtonStyle}>
+                ✕
+              </a>
+            </div>
+
+            <p style={subtitleStyle}>
+              This QR pass is invalid, expired, or no longer active.
+            </p>
+
+            <div style={badBadgeStyle}>INVALID PASS</div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  const { data: passRows, error: passError } = await supabase
+    .from("transit_qr_passes")
+    .select("*")
+    .eq("is_active", true)
+    .order("created_at", { ascending: false });
+
+  const passRow =
+    (passRows ?? []).find(
+      (row: any) => normalizeToken(row?.qr_code_value) === token
+    ) ?? null;
+
+  const isExpired =
+    !!passRow?.expires_at &&
+    new Date(passRow.expires_at).getTime() < Date.now();
+
+  if (passError || !passRow || isExpired) {
+    return (
+      <main style={pageStyle}>
+        <div style={shellStyle}>
+          <div style={invalidCardStyle}>
+            <div style={topRowStyle}>
+              <div>
+                <div style={brandStyle}>BERRIES TRANSIT</div>
+                <h1 style={titleStyle}>Transit Pass Not Found</h1>
+              </div>
+
+              <a href={isAirportMode ? "/scan" : "/"} style={closeButtonStyle}>
+                ✕
+              </a>
+            </div>
+
+            <p style={subtitleStyle}>
+              This QR pass is invalid, expired, or no longer active.
+            </p>
+
+            <div style={badBadgeStyle}>INVALID PASS</div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  const scanMode = isAirportMode ? "airport" : "general";
+
+  await supabase.from("transit_qr_scans").insert({
+    qr_pass_id: passRow.id,
+    token,
+    scan_mode: scanMode,
+    note: isAirportMode
+      ? "Transit pass opened from airport scanner mode"
+      : "Transit pass opened from QR verification page",
+  });
+
+  const { count: scanCount } = await supabase
+    .from("transit_qr_scans")
+    .select("*", { count: "exact", head: true })
+    .eq("qr_pass_id", passRow.id);
+
+  const tripRes = await supabase
     .from("transit_trips")
     .select(
       "id, title, departure_city, destination_city, airline, flight_number, hotel_name"
     )
-    .eq("id", passRow.trip_id)
-    .maybeSingle<Trip>();
+    .eq("id", String(passRow.trip_id))
+    .limit(1);
 
-  const { data: docs } = await supabase
+  const safeTrip = ((tripRes.data ?? [])[0] ?? null) as Trip | null;
+
+  const docsRes = await supabase
     .from("transit_documents")
-    .select("id, document_type, file_name, verified")
-    .eq("trip_id", passRow.trip_id)
+    .select("id, document_type, file_name, verified, trip_id")
+    .eq("trip_id", String(passRow.trip_id))
     .order("created_at", { ascending: false });
 
-  const documents = (docs ?? []) as TransitDocument[];
+  const documents = (docsRes.data ?? []) as TransitDocument[];
+
+  console.log("PASS ROW:", passRow);
+  console.log("TRIP LOOKUP RESULT:", tripRes.data);
+  console.log("DOCS LOOKUP RESULT:", docsRes.data);
 
   const hasType = (type: string) =>
     documents.some((doc) => (doc.document_type ?? "").toLowerCase() === type);
@@ -107,51 +169,125 @@ const { count: scanCount } = await supabase
     readiness.ticket &&
     readiness.hotel_booking;
 
+  const reviewRequired =
+    !readiness.passport || !readiness.ticket || !readiness.hotel_booking;
+
+ const hasPassport = readiness.passport;
+const hasTicket = readiness.ticket;
+const hasHotel = readiness.hotel_booking;
+
+const hasMinimum = hasPassport && hasTicket && hasHotel;
+
+const verifiedDocs = documents.filter((d) => d.verified).length;
+const totalDocs = documents.length;
+
+const overallStatus: "GREEN" | "RED" | "REVIEW" =
+  isExpired
+    ? "RED"
+    : hasMinimum && verifiedDocs >= 1
+    ? "GREEN"
+    : hasMinimum
+    ? "REVIEW"
+    : "RED";
+
+  const statusTitle =
+  overallStatus === "GREEN"
+    ? "CLEARED FOR TRAVEL"
+    : overallStatus === "RED"
+    ? "ENTRY DENIED"
+    : "MANUAL REVIEW REQUIRED";
+
+    const headerTitle =
+  overallStatus === "GREEN"
+    ? "Transit Pass Verified"
+    : overallStatus === "RED"
+    ? "Transit Pass Rejected"
+    : "Transit Pass Pending Review";
+
+const statusSubtitle =
+  overallStatus === "GREEN"
+    ? "Passenger meets travel requirements."
+    : overallStatus === "RED"
+    ? "Critical travel documents are missing."
+    : "Documents require officer verification.";
+
+  const heroBadgeStyle =
+    overallStatus === "GREEN"
+      ? goodBadgeStyle
+      : overallStatus === "RED"
+      ? redBadgeStyle
+      : warnBadgeStyle;
+
+  const summaryStyle =
+    overallStatus === "GREEN"
+      ? summaryGoodStyle
+      : overallStatus === "RED"
+      ? summaryBadStyle
+      : summaryWarnStyle;
+
   return (
     <main style={pageStyle}>
-      <div style={shellStyle}>
+      <div style={{ ...shellStyle, maxWidth: isAirportMode ? 1200 : 920 }}>
         <div style={cardStyle}>
           <div style={heroStyle}>
             <div style={topRowStyle}>
               <div>
-                <div style={brandStyle}>BERRIES TRANSIT</div>
-                <h1 style={heroTitleStyle}>Transit Pass Verified</h1>
-                <p style={heroSubtitleStyle}>
-                  This travel pass is valid and active.
-                </p>
+                <div style={brandStyle}>
+                  {isAirportMode ? "BERRIES AIRPORT MODE" : "BERRIES TRANSIT"}
+                </div>
+                <h1 style={heroTitleStyle}>
+                  {isAirportMode ? "Transit Verification" : headerTitle}
+                </h1>
+                <p style={heroSubtitleStyle}>{statusSubtitle}</p>
               </div>
 
-              <a href="/transit" style={closeButtonStyle}>
+              <a href={isAirportMode ? "/scan" : "/"} style={closeButtonStyle}>
                 ✕
               </a>
             </div>
 
-            <div style={ready ? goodBadgeStyle : warnBadgeStyle}>
-              {ready ? "READY FOR TRAVEL" : "DOCUMENTS MISSING"}
-            </div>
+            <div
+  style={{
+    ...heroBadgeStyle,
+    fontSize: 16,
+    padding: "14px 22px",
+    letterSpacing: 1,
+  }}
+>
+  {overallStatus === "GREEN" && "🟢 "}
+  {overallStatus === "REVIEW" && "🟡 "}
+  {overallStatus === "RED" && "🔴 "}
+  {statusTitle}
+</div>
           </div>
+
+          <section style={sectionStyle}>
+            <div style={summaryStyle}>
+              <div style={summaryTitleStyle}>{statusTitle}</div>
+              <div style={summaryTextStyle}>{statusSubtitle}</div>
+            </div>
+          </section>
 
           <div style={gridStyle}>
             <section style={sectionCardStyle}>
               <div style={sectionLabelStyle}>Route</div>
               <div style={routeStyle}>
-                <span>{trip?.departure_city || "Unknown"}</span>
+                <span>{safeTrip?.departure_city || "Unknown"}</span>
                 <span style={arrowStyle}>→</span>
-                <span>{trip?.destination_city || "Unknown"}</span>
+                <span>{safeTrip?.destination_city || "Unknown"}</span>
               </div>
-              <div style={mutedStyle}>
-                {trip?.title || "Untitled trip"}
-              </div>
+              <div style={mutedStyle}>{safeTrip?.title || "Untitled trip"}</div>
             </section>
 
             <section style={sectionCardStyle}>
               <div style={sectionLabelStyle}>Flight</div>
               <div style={primaryTextStyle}>
-                {[trip?.airline, trip?.flight_number].filter(Boolean).join(" • ") ||
-                  "Not added"}
+                {[safeTrip?.airline, safeTrip?.flight_number]
+                  .filter(Boolean)
+                  .join(" • ") || "Not added"}
               </div>
               <div style={mutedStyle}>
-                Hotel: {trip?.hotel_name || "Not added"}
+                Hotel: {safeTrip?.hotel_name || "Not added"}
               </div>
             </section>
           </div>
@@ -187,9 +323,7 @@ const { count: scanCount } = await supabase
                     </div>
 
                     <div
-                      style={
-                        doc.verified ? verifiedPillStyle : pendingPillStyle
-                      }
+                      style={doc.verified ? verifiedPillStyle : pendingPillStyle}
                     >
                       {doc.verified ? "Verified" : "Pending"}
                     </div>
@@ -200,22 +334,30 @@ const { count: scanCount } = await supabase
           </section>
 
           <section style={footerStyle}>
-  <div style={tokenBoxStyle}>
-    <div style={tokenLabelStyle}>PASS TOKEN</div>
-    <div style={tokenValueStyle}>{token}</div>
+            <div style={tokenBoxStyle}>
+              <div style={tokenLabelStyle}>PASS TOKEN</div>
+              <div style={tokenValueStyle}>{token}</div>
 
-    <div style={{ marginTop: 12, color: "#d1d5db", fontSize: 13 }}>
-      Expires:{" "}
-      {passRow.expires_at
-        ? new Date(passRow.expires_at).toLocaleString()
-        : "Not set"}
-    </div>
+              <div style={tokenMetaRowStyle}>
+                <div style={tokenMetaItemStyle}>
+                  Expires:{" "}
+                  {passRow.expires_at
+                    ? new Date(passRow.expires_at).toLocaleString()
+                    : "Not set"}
+                </div>
 
-    <div style={{ marginTop: 8, color: "#d1d5db", fontSize: 13 }}>
-      Total scans: {scanCount ?? 0}
-    </div>
-  </div>
-</section>
+                <div style={tokenMetaItemStyle}>
+                  Total scans: {scanCount ?? 0}
+                </div>
+
+                <div style={tokenMetaItemStyle}>
+                  Mode: {isAirportMode ? "Airport scanner" : "Passenger view"}
+                </div>
+
+                <div style={tokenMetaItemStyle}>Status: {overallStatus}</div>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
     </main>
@@ -356,6 +498,19 @@ const warnBadgeStyle: React.CSSProperties = {
   letterSpacing: 0.4,
 };
 
+const redBadgeStyle: React.CSSProperties = {
+  display: "inline-block",
+  marginTop: 20,
+  background: "rgba(254,226,226,0.16)",
+  color: "#fecaca",
+  border: "1px solid rgba(254,202,202,0.45)",
+  borderRadius: 999,
+  padding: "10px 16px",
+  fontSize: 13,
+  fontWeight: 900,
+  letterSpacing: 0.4,
+};
+
 const badBadgeStyle: React.CSSProperties = {
   display: "inline-block",
   background: "#fef2f2",
@@ -366,6 +521,41 @@ const badBadgeStyle: React.CSSProperties = {
   fontSize: 13,
   fontWeight: 900,
   letterSpacing: 0.4,
+};
+
+const summaryGoodStyle: React.CSSProperties = {
+  borderRadius: 18,
+  background: "#ecfdf5",
+  border: "1px solid #86efac",
+  padding: 18,
+  color: "#166534",
+};
+
+const summaryWarnStyle: React.CSSProperties = {
+  borderRadius: 18,
+  background: "#fff7ed",
+  border: "1px solid #fdba74",
+  padding: 18,
+  color: "#9a3412",
+};
+
+const summaryBadStyle: React.CSSProperties = {
+  borderRadius: 18,
+  background: "#fef2f2",
+  border: "1px solid #fca5a5",
+  padding: 18,
+  color: "#991b1b",
+};
+
+const summaryTitleStyle: React.CSSProperties = {
+  fontSize: 22,
+  fontWeight: 900,
+};
+
+const summaryTextStyle: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 14,
+  lineHeight: 1.6,
 };
 
 const gridStyle: React.CSSProperties = {
@@ -527,4 +717,16 @@ const tokenValueStyle: React.CSSProperties = {
   lineHeight: 1.5,
   fontWeight: 800,
   wordBreak: "break-word",
+};
+
+const tokenMetaRowStyle: React.CSSProperties = {
+  marginTop: 12,
+  display: "grid",
+  gap: 8,
+};
+
+const tokenMetaItemStyle: React.CSSProperties = {
+  color: "#d1d5db",
+  fontSize: 13,
+  lineHeight: 1.5,
 };

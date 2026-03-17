@@ -1,165 +1,231 @@
-import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
+import { NextResponse } from "next/server";
 
-type TransitDocument = {
-  id: string;
-  trip_id: string;
-  document_type: string | null;
-  file_name: string | null;
-  verified: boolean | null;
-};
+function normalizeToken(value: string | null | undefined) {
+  if (!value) return null;
+  const trimmed = value.trim();
 
-export async function POST(req: NextRequest) {
+  if (trimmed.includes("/transit/pass/")) {
+    const part = trimmed.split("/transit/pass/")[1] ?? "";
+    return part.split("?")[0].split("#")[0].trim() || null;
+  }
+
+  return trimmed;
+}
+
+export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const rawToken = String(body?.token ?? "").trim();
-    const scanMode = String(body?.scan_mode ?? "airport").trim();
-    const verifierType = String(body?.verifier_type ?? "airport_staff").trim();
 
-    if (!rawToken) {
-      return NextResponse.json(
-        { ok: false, error: "Token is required." },
-        { status: 400 }
-      );
+    const rawToken = String(body?.token ?? "");
+    const scan_mode = String(body?.scan_mode ?? "airport");
+    const verifier_type = String(body?.verifier_type ?? "airport_staff");
+
+    const token = normalizeToken(rawToken);
+
+    if (!token) {
+      return NextResponse.json({
+        ok: false,
+        error: "Missing token",
+      });
     }
 
-    const token = rawToken.includes("/transit/pass/")
-      ? rawToken.split("/transit/pass/")[1]?.split("?")[0] ?? rawToken
-      : rawToken;
-
-    const { data: passes, error: passError } = await supabase
+    const { data: passRows, error: passError } = await supabase
       .from("transit_qr_passes")
       .select("*")
-      .ilike("qr_code_value", `%${token}%`)
-      .order("created_at", { ascending: false })
-      .limit(1);
+      .eq("is_active", true)
+      .order("created_at", { ascending: false });
 
     if (passError) {
-      return NextResponse.json(
-        { ok: false, error: passError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        ok: false,
+        error: passError.message,
+      });
     }
 
-    const passRow = passes?.[0] ?? null;
+    const passRow =
+      (passRows ?? []).find(
+        (row: any) => normalizeToken(row?.qr_code_value) === token
+      ) ?? null;
 
     if (!passRow) {
-      return NextResponse.json(
-        {
-          ok: true,
-          verified: false,
-          status: "PASS_NOT_FOUND",
-          message: "Transit pass not found.",
+      return NextResponse.json({
+        ok: true,
+        verified: false,
+        status: "NOT_FOUND",
+        message: "Transit pass not found.",
+        token,
+        total_scans: 0,
+        documents: [],
+        trip: {
+          title: "Untitled trip",
+          departure_city: "Unknown",
+          destination_city: "Unknown",
+          airline: null,
+          flight_number: null,
+          hotel_name: null,
         },
-        { status: 200 }
-      );
+        readiness: {
+          passport: false,
+          visa: false,
+          ticket: false,
+          hotel_booking: false,
+          vaccination: false,
+        },
+      });
     }
 
-    const { data: trip, error: tripError } = await supabase
+    const isExpired =
+      !!passRow?.expires_at &&
+      new Date(passRow.expires_at).getTime() < Date.now();
+
+    if (isExpired) {
+      return NextResponse.json({
+        ok: true,
+        verified: false,
+        status: "EXPIRED",
+        message: "Transit pass has expired.",
+        token,
+        total_scans: 0,
+        pass: {
+          id: passRow.id,
+          is_active: passRow.is_active,
+          created_at: passRow.created_at,
+          expires_at: passRow.expires_at,
+        },
+        documents: [],
+        trip: {
+          title: "Untitled trip",
+          departure_city: "Unknown",
+          destination_city: "Unknown",
+          airline: null,
+          flight_number: null,
+          hotel_name: null,
+        },
+        readiness: {
+          passport: false,
+          visa: false,
+          ticket: false,
+          hotel_booking: false,
+          vaccination: false,
+        },
+      });
+    }
+
+    await supabase.from("transit_qr_scans").insert({
+      qr_pass_id: passRow.id,
+      token,
+      scan_mode,
+      verifier_type,
+      note: "Transit pass verified from live airport scanner dashboard",
+    });
+
+    const { count: scanCount } = await supabase
+      .from("transit_qr_scans")
+      .select("*", { count: "exact", head: true })
+      .eq("qr_pass_id", passRow.id);
+
+    const { data: tripRows, error: tripError } = await supabase
       .from("transit_trips")
       .select(
         "id, title, departure_city, destination_city, airline, flight_number, hotel_name"
       )
-      .eq("id", passRow.trip_id)
-      .maybeSingle();
+      .eq("id", String(passRow.trip_id))
+      .limit(1);
 
     if (tripError) {
-      return NextResponse.json(
-        { ok: false, error: tripError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        ok: false,
+        error: tripError.message,
+      });
     }
 
-    const { data: docsRaw, error: docsError } = await supabase
+    const trip = (tripRows?.[0] ?? null) as {
+      id: string;
+      title: string | null;
+      departure_city: string | null;
+      destination_city: string | null;
+      airline: string | null;
+      flight_number: string | null;
+      hotel_name: string | null;
+    } | null;
+
+    const { data: docs, error: docsError } = await supabase
       .from("transit_documents")
-      .select("id, trip_id, document_type, file_name, verified")
-      .eq("trip_id", passRow.trip_id)
+      .select("id, document_type, file_name, verified")
+      .eq("trip_id", String(passRow.trip_id))
       .order("created_at", { ascending: false });
 
     if (docsError) {
-      return NextResponse.json(
-        { ok: false, error: docsError.message },
-        { status: 500 }
-      );
+      return NextResponse.json({
+        ok: false,
+        error: docsError.message,
+      });
     }
 
-    const docs = (docsRaw ?? []) as TransitDocument[];
+    const documents = docs ?? [];
 
-    const hasType = (type: string) =>
-      docs.some((doc) => (doc.document_type ?? "").toLowerCase() === type);
+    const hasVerifiedType = (type: string) =>
+      documents.some(
+        (doc: any) =>
+          (doc.document_type ?? "").toLowerCase() === type &&
+          doc.verified === true
+      );
 
     const readiness = {
-      passport: hasType("passport"),
-      visa: hasType("visa"),
-      ticket: hasType("ticket"),
-      hotel_booking: hasType("hotel_booking"),
-      vaccination: hasType("vaccination"),
+      passport: hasVerifiedType("passport"),
+      visa: hasVerifiedType("visa"),
+      ticket: hasVerifiedType("ticket"),
+      hotel_booking: hasVerifiedType("hotel_booking"),
+      vaccination: hasVerifiedType("vaccination"),
     };
 
-    const requiredReady =
-      readiness.passport && readiness.ticket && readiness.hotel_booking;
+    const hasMinimumRequired =
+      readiness.passport &&
+      readiness.ticket &&
+      readiness.hotel_booking;
 
-    const isActive = !!passRow.is_active;
-
-    let status = "VERIFIED";
-    let message = "Transit pass is valid.";
-
-    if (!isActive) {
-      status = "PASS_INACTIVE";
-      message = "Transit pass is inactive.";
-    } else if (!requiredReady) {
-      status = "DOCUMENTS_MISSING";
-      message = "Transit pass is active, but required documents are missing.";
-    }
-
-    const verified = isActive && requiredReady;
-
-    await supabase.from("transit_pass_scans").insert({
-      pass_id: passRow.id,
-      token,
-      scan_mode: scanMode,
-      verifier_type: verifierType,
-      verified,
-      result_status: status,
-      notes: message,
-    });
-
-    const { count: totalScans } = await supabase
-      .from("transit_pass_scans")
-      .select("*", { count: "exact", head: true })
-      .eq("pass_id", passRow.id);
+    const verified = hasMinimumRequired;
 
     return NextResponse.json({
       ok: true,
       verified,
-      status,
-      message,
+      status: verified ? "VERIFIED" : "REVIEW_REQUIRED",
+      message: verified
+        ? "Transit pass is active and required documents are available."
+        : "Transit pass is active, but required documents are missing.",
       token,
-      total_scans: totalScans ?? 0,
+      total_scans: scanCount ?? 0,
       pass: {
         id: passRow.id,
         is_active: passRow.is_active,
         created_at: passRow.created_at,
-        expires_at: passRow.expires_at ?? null,
+        expires_at: passRow.expires_at,
       },
-      trip: {
-        title: trip?.title ?? "Untitled trip",
-        departure_city: trip?.departure_city ?? "Unknown",
-        destination_city: trip?.destination_city ?? "Unknown",
-        airline: trip?.airline ?? null,
-        flight_number: trip?.flight_number ?? null,
-        hotel_name: trip?.hotel_name ?? null,
-      },
+      trip: trip
+        ? {
+            title: trip.title ?? "Untitled trip",
+            departure_city: trip.departure_city ?? "Unknown",
+            destination_city: trip.destination_city ?? "Unknown",
+            airline: trip.airline ?? null,
+            flight_number: trip.flight_number ?? null,
+            hotel_name: trip.hotel_name ?? null,
+          }
+        : {
+            title: "Untitled trip",
+            departure_city: "Unknown",
+            destination_city: "Unknown",
+            airline: null,
+            flight_number: null,
+            hotel_name: null,
+          },
       readiness,
-      documents: docs,
+      documents,
     });
   } catch (error: any) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: error?.message ?? "Failed to verify transit pass.",
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({
+      ok: false,
+      error: error?.message ?? "Verification failed",
+    });
   }
 }
