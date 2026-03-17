@@ -7,7 +7,6 @@ type PageProps = {
 };
 
 type Trip = {
-  id: string;
   title: string | null;
   departure_city: string | null;
   destination_city: string | null;
@@ -24,6 +23,17 @@ type TransitDocument = {
   verified: boolean | null;
 };
 
+type PassRow = {
+  id: string;
+  trip_id: string | null;
+  qr_code_value: string | null;
+  is_active: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
+  expires_at: string | null;
+  trip?: Trip | Trip[] | null;
+};
+
 function normalizeToken(value: string | null | undefined) {
   if (!value) return null;
   const trimmed = value.trim();
@@ -34,6 +44,12 @@ function normalizeToken(value: string | null | undefined) {
   }
 
   return trimmed;
+}
+
+function getSafeTrip(passRow: PassRow | null): Trip | null {
+  if (!passRow?.trip) return null;
+  if (Array.isArray(passRow.trip)) return passRow.trip[0] ?? null;
+  return passRow.trip;
 }
 
 export default async function TransitPassPage({
@@ -73,21 +89,30 @@ export default async function TransitPassPage({
     );
   }
 
-  const { data: passRow, error: passError } = await supabase
-  .from("transit_qr_passes")
-.select(`
-  *,
-  trip:transit_trips (
-    title,
-    departure_city,
-    destination_city,
-    airline,
-    flight_number,
-    hotel_name
-  )
-`)
-.eq("qr_code_value", token)
-.single();
+  const { data: passRowRaw, error: passError } = await supabase
+    .from("transit_qr_passes")
+    .select(`
+      id,
+      trip_id,
+      qr_code_value,
+      is_active,
+      created_at,
+      updated_at,
+      expires_at,
+      trip:transit_trips (
+        title,
+        departure_city,
+        destination_city,
+        airline,
+        flight_number,
+        hotel_name
+      )
+    `)
+    .eq("qr_code_value", token)
+    .single();
+
+  const passRow = (passRowRaw ?? null) as PassRow | null;
+
   const isExpired =
     !!passRow?.expires_at &&
     new Date(passRow.expires_at).getTime() < Date.now();
@@ -135,15 +160,7 @@ export default async function TransitPassPage({
     .select("*", { count: "exact", head: true })
     .eq("qr_pass_id", passRow.id);
 
-  const tripRes = await supabase
-    .from("transit_trips")
-    .select(
-      "id, title, departure_city, destination_city, airline, flight_number, hotel_name"
-    )
-    .eq("id", String(passRow.trip_id))
-    .limit(1);
-
-  const safeTrip = ((tripRes.data ?? [])[0] ?? null) as Trip | null;
+  const safeTrip = getSafeTrip(passRow);
 
   const docsRes = await supabase
     .from("transit_documents")
@@ -154,79 +171,73 @@ export default async function TransitPassPage({
   const documents = (docsRes.data ?? []) as TransitDocument[];
 
   console.log("PASS ROW:", passRow);
-  console.log("TRIP LOOKUP RESULT:", tripRes.data);
+  console.log("SAFE TRIP:", safeTrip);
   console.log("DOCS LOOKUP RESULT:", docsRes.data);
 
- const hasVerifiedType = (type: string) =>
-  documents.some(
-    (doc) =>
-      (doc.document_type ?? "").toLowerCase() === type && doc.verified === true
-  );
+  const hasVerifiedType = (type: string) =>
+    documents.some(
+      (doc) =>
+        (doc.document_type ?? "").toLowerCase() === type &&
+        doc.verified === true
+    );
 
-const hasAnyType = (type: string) =>
-  documents.some((doc) => (doc.document_type ?? "").toLowerCase() === type);
+  const hasAnyType = (type: string) =>
+    documents.some((doc) => (doc.document_type ?? "").toLowerCase() === type);
 
-const readiness = {
-  passport: hasVerifiedType("passport"),
-  visa: hasVerifiedType("visa"),
-  ticket: hasVerifiedType("ticket"),
-  hotel_booking: hasVerifiedType("hotel_booking"),
-  vaccination: hasVerifiedType("vaccination"),
-};
+  const readiness = {
+    passport: hasVerifiedType("passport"),
+    visa: hasVerifiedType("visa"),
+    ticket: hasVerifiedType("ticket"),
+    hotel_booking: hasVerifiedType("hotel_booking"),
+    vaccination: hasVerifiedType("vaccination"),
+  };
 
-const presence = {
-  passport: hasAnyType("passport"),
-  visa: hasAnyType("visa"),
-  ticket: hasAnyType("ticket"),
-  hotel_booking: hasAnyType("hotel_booking"),
-  vaccination: hasAnyType("vaccination"),
-};
-  const ready =
+  const presence = {
+    passport: hasAnyType("passport"),
+    visa: hasAnyType("visa"),
+    ticket: hasAnyType("ticket"),
+    hotel_booking: hasAnyType("hotel_booking"),
+    vaccination: hasAnyType("vaccination"),
+  };
+
+  const hasMinimumVerified =
     readiness.passport &&
     readiness.ticket &&
     readiness.hotel_booking;
 
-  const reviewRequired =
-    !readiness.passport || !readiness.ticket || !readiness.hotel_booking;
+  const hasMinimumUploaded =
+    presence.passport &&
+    presence.ticket &&
+    presence.hotel_booking;
 
-const hasMinimumVerified =
-  readiness.passport &&
-  readiness.ticket &&
-  readiness.hotel_booking;
-
-const hasMinimumUploaded =
-  presence.passport &&
-  presence.ticket &&
-  presence.hotel_booking;
-
-const overallStatus: "GREEN" | "RED" | "REVIEW" = isExpired
-  ? "RED"
-  : hasMinimumVerified
-  ? "GREEN"
-  : hasMinimumUploaded
-  ? "REVIEW"
-  : "RED";
+  const overallStatus: "GREEN" | "RED" | "REVIEW" = isExpired
+    ? "RED"
+    : hasMinimumVerified
+    ? "GREEN"
+    : hasMinimumUploaded
+    ? "REVIEW"
+    : "RED";
 
   const statusTitle =
-  overallStatus === "GREEN"
-    ? "CLEARED FOR TRAVEL"
-    : overallStatus === "RED"
-    ? "ENTRY DENIED"
-    : "MANUAL REVIEW REQUIRED";
+    overallStatus === "GREEN"
+      ? "CLEARED FOR TRAVEL"
+      : overallStatus === "RED"
+      ? "ENTRY DENIED"
+      : "MANUAL REVIEW REQUIRED";
 
-    const headerTitle =
-  overallStatus === "GREEN"
-    ? "Transit Pass Verified"
-    : overallStatus === "RED"
-    ? "Transit Pass Rejected"
-    : "Transit Pass Pending Review";
+  const headerTitle =
+    overallStatus === "GREEN"
+      ? "Transit Pass Verified"
+      : overallStatus === "RED"
+      ? "Transit Pass Rejected"
+      : "Transit Pass Pending Review";
 
-const statusSubtitle =
-  overallStatus === "GREEN"
-    ? "Passenger meets travel requirements."
-    : overallStatus === "RED"
-    ? "Critical travel documents are missing."
-    : "Documents require officer verification.";
+  const statusSubtitle =
+    overallStatus === "GREEN"
+      ? "Passenger meets travel requirements."
+      : overallStatus === "RED"
+      ? "Critical travel documents are missing."
+      : "Documents require officer verification.";
 
   const heroBadgeStyle =
     overallStatus === "GREEN"
@@ -264,18 +275,18 @@ const statusSubtitle =
             </div>
 
             <div
-  style={{
-    ...heroBadgeStyle,
-    fontSize: 16,
-    padding: "14px 22px",
-    letterSpacing: 1,
-  }}
->
-  {overallStatus === "GREEN" && "🟢 "}
-  {overallStatus === "REVIEW" && "🟡 "}
-  {overallStatus === "RED" && "🔴 "}
-  {statusTitle}
-</div>
+              style={{
+                ...heroBadgeStyle,
+                fontSize: 16,
+                padding: "14px 22px",
+                letterSpacing: 1,
+              }}
+            >
+              {overallStatus === "GREEN" && "🟢 "}
+              {overallStatus === "REVIEW" && "🟡 "}
+              {overallStatus === "RED" && "🔴 "}
+              {statusTitle}
+            </div>
           </div>
 
           <section style={sectionStyle}>
