@@ -75,10 +75,19 @@ export default async function TransitPassPage({
 
   const { data: passRow, error: passError } = await supabase
   .from("transit_qr_passes")
-  .select("*")
-  .eq("qr_code_value", token)
-  .single();
-
+.select(`
+  *,
+  trip:transit_trips (
+    title,
+    departure_city,
+    destination_city,
+    airline,
+    flight_number,
+    hotel_name
+  )
+`)
+.eq("qr_code_value", token)
+.single();
   const isExpired =
     !!passRow?.expires_at &&
     new Date(passRow.expires_at).getTime() < Date.now();
@@ -148,17 +157,30 @@ export default async function TransitPassPage({
   console.log("TRIP LOOKUP RESULT:", tripRes.data);
   console.log("DOCS LOOKUP RESULT:", docsRes.data);
 
-  const hasType = (type: string) =>
-    documents.some((doc) => (doc.document_type ?? "").toLowerCase() === type);
+ const hasVerifiedType = (type: string) =>
+  documents.some(
+    (doc) =>
+      (doc.document_type ?? "").toLowerCase() === type && doc.verified === true
+  );
 
-  const readiness = {
-    passport: hasType("passport"),
-    visa: hasType("visa"),
-    ticket: hasType("ticket"),
-    hotel_booking: hasType("hotel_booking"),
-    vaccination: hasType("vaccination"),
-  };
+const hasAnyType = (type: string) =>
+  documents.some((doc) => (doc.document_type ?? "").toLowerCase() === type);
 
+const readiness = {
+  passport: hasVerifiedType("passport"),
+  visa: hasVerifiedType("visa"),
+  ticket: hasVerifiedType("ticket"),
+  hotel_booking: hasVerifiedType("hotel_booking"),
+  vaccination: hasVerifiedType("vaccination"),
+};
+
+const presence = {
+  passport: hasAnyType("passport"),
+  visa: hasAnyType("visa"),
+  ticket: hasAnyType("ticket"),
+  hotel_booking: hasAnyType("hotel_booking"),
+  vaccination: hasAnyType("vaccination"),
+};
   const ready =
     readiness.passport &&
     readiness.ticket &&
@@ -167,23 +189,23 @@ export default async function TransitPassPage({
   const reviewRequired =
     !readiness.passport || !readiness.ticket || !readiness.hotel_booking;
 
- const hasPassport = readiness.passport;
-const hasTicket = readiness.ticket;
-const hasHotel = readiness.hotel_booking;
+const hasMinimumVerified =
+  readiness.passport &&
+  readiness.ticket &&
+  readiness.hotel_booking;
 
-const hasMinimum = hasPassport && hasTicket && hasHotel;
+const hasMinimumUploaded =
+  presence.passport &&
+  presence.ticket &&
+  presence.hotel_booking;
 
-const verifiedDocs = documents.filter((d) => d.verified).length;
-const totalDocs = documents.length;
-
-const overallStatus: "GREEN" | "RED" | "REVIEW" =
-  isExpired
-    ? "RED"
-    : hasMinimum && verifiedDocs >= 1
-    ? "GREEN"
-    : hasMinimum
-    ? "REVIEW"
-    : "RED";
+const overallStatus: "GREEN" | "RED" | "REVIEW" = isExpired
+  ? "RED"
+  : hasMinimumVerified
+  ? "GREEN"
+  : hasMinimumUploaded
+  ? "REVIEW"
+  : "RED";
 
   const statusTitle =
   overallStatus === "GREEN"
