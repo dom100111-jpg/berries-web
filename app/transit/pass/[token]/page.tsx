@@ -73,16 +73,11 @@ export default async function TransitPassPage({
     );
   }
 
-  const { data: passRows, error: passError } = await supabase
-    .from("transit_qr_passes")
-    .select("*")
-    .eq("is_active", true)
-    .order("created_at", { ascending: false });
-
-  const passRow =
-    (passRows ?? []).find(
-      (row: any) => normalizeToken(row?.qr_code_value) === token
-    ) ?? null;
+  const { data: passRow, error: passError } = await supabase
+  .from("transit_qr_passes")
+  .select("*")
+  .eq("qr_code_value", token)
+  .single();
 
   const isExpired =
     !!passRow?.expires_at &&
