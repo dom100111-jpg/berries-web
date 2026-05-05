@@ -14,7 +14,7 @@ type VerifyResponse = {
     is_active: boolean;
     created_at: string;
     expires_at?: string | null;
-  };
+  } | null;
   trip?: {
     title: string;
     departure_city: string;
@@ -22,7 +22,7 @@ type VerifyResponse = {
     airline?: string | null;
     flight_number?: string | null;
     hotel_name?: string | null;
-  };
+  } | null;
   readiness?: {
     passport: boolean;
     visa: boolean;
@@ -30,12 +30,16 @@ type VerifyResponse = {
     hotel_booking: boolean;
     vaccination: boolean;
   };
-  documents?: Array<{
+  request?: {
     id: string;
-    document_type: string | null;
-    file_name: string | null;
-    verified: boolean | null;
-  }>;
+    trip_id: string | null;
+    qr_pass_id: string | null;
+    request_status: string | null;
+    pass_status: string | null;
+    airport_note: string | null;
+    approved_at: string | null;
+    rejected_at: string | null;
+  } | null;
   error?: string;
 };
 
@@ -54,21 +58,30 @@ export default function ScanPage() {
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<VerifyResponse | null>(null);
-  const [updatingDocId, setUpdatingDocId] = useState<string | null>(null);
-const [actionMessage, setActionMessage] = useState("");
+  const [showMenu, setShowMenu] = useState(false);
 
-  const badgeText = useMemo(() => {
-    if (!result) return "READY TO SCAN";
-    if (result.verified) return "VERIFIED";
-    return result.status ?? "REJECTED";
+  const statusLabel = useMemo(() => {
+    if (!result) return "READY";
+    if (!result.ok) return "ERROR";
+    if (result.verified) return "CLEARED";
+    return result.status ?? "HOLD";
   }, [result]);
 
-  const badgeStyle = useMemo(() => {
-    if (!result) return statusNeutralStyle;
-    return result.verified ? statusGoodStyle : statusBadStyle;
+  const statusPillStyle = useMemo(() => {
+    if (!result) return readyPillStyle;
+    if (!result.ok) return errorPillStyle;
+    if (result.verified) return successPillStyle;
+    return holdPillStyle;
   }, [result]);
 
-  const verifyNow = async () => {
+  const resultBannerStyle = useMemo(() => {
+    if (!result) return neutralBannerStyle;
+    if (!result.ok) return errorBannerStyle;
+    if (result.verified) return successBannerStyle;
+    return holdBannerStyle;
+  }, [result]);
+
+  async function scanNow() {
     try {
       setLoading(true);
       setResult(null);
@@ -83,7 +96,7 @@ const [actionMessage, setActionMessage] = useState("");
         body: JSON.stringify({
           token: cleaned,
           scan_mode: "airport",
-          verifier_type: "airport_staff",
+          verifier_type: "airport_scanner",
         }),
       });
 
@@ -92,104 +105,59 @@ const [actionMessage, setActionMessage] = useState("");
     } catch (error: any) {
       setResult({
         ok: false,
-        error: error?.message ?? "Verification failed.",
+        error: error?.message ?? "Scan failed.",
       });
     } finally {
       setLoading(false);
     }
-  };
- const updateDocumentStatus = async (
-  documentId: string,
-  verified: boolean
-) => {
-  try {
-    setUpdatingDocId(documentId);
-    setActionMessage("");
-
-    const res = await fetch("/api/scan/document-verify", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        documentId,
-        status: verified ? "verified" : "pending",
-      }),
-    });
-
-    const json = await res.json();
-
-    if (!res.ok || !json.ok) {
-      setActionMessage(json.error || "Failed to update document.");
-      return;
-    }
-
-    setResult((prev) => {
-      if (!prev || !prev.documents) return prev;
-
-      const updatedDocuments = prev.documents.map((doc) =>
-        doc.id === documentId
-          ? { ...doc, verified }
-          : doc
-      );
-
-      const hasVerifiedType = (type: string) =>
-        updatedDocuments.some(
-          (doc) =>
-            (doc.document_type ?? "").toLowerCase() === type &&
-            doc.verified === true
-        );
-
-      const readiness = {
-        passport: hasVerifiedType("passport"),
-        visa: hasVerifiedType("visa"),
-        ticket: hasVerifiedType("ticket"),
-        hotel_booking: hasVerifiedType("hotel_booking"),
-        vaccination: hasVerifiedType("vaccination"),
-      };
-
-      const minimumReady =
-        readiness.passport &&
-        readiness.ticket &&
-        readiness.hotel_booking;
-
-      return {
-        ...prev,
-        documents: updatedDocuments,
-        readiness,
-        verified: minimumReady,
-        status: minimumReady ? "VERIFIED" : "REVIEW_REQUIRED",
-        message: minimumReady
-          ? "Transit pass is active and required documents are available."
-          : "Transit pass is active, but required documents are missing.",
-      };
-    });
-
-    setActionMessage(
-      verified
-        ? "Document marked as verified."
-        : "Document marked as pending."
-    );
-  } catch (error) {
-    setActionMessage("Something went wrong while updating document.");
-  } finally {
-    setUpdatingDocId(null);
   }
-};
+
   return (
     <main style={pageStyle}>
       <div style={shellStyle}>
         <section style={heroStyle}>
-          <div style={heroTopRowStyle}>
+          <div style={heroRowStyle}>
             <div>
               <div style={eyebrowStyle}>BERRIES AIRPORT MODE</div>
               <h1 style={heroTitleStyle}>Live Transit Scanner</h1>
               <p style={heroTextStyle}>
-                Verify passenger travel readiness from QR token or scanned URL.
+                Scanner reads the final airport QR and immediately checks if the
+                passenger is cleared for boarding.
               </p>
             </div>
 
-            <div style={badgeStyle}>{badgeText}</div>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+              <div style={statusPillStyle}>{statusLabel}</div>
+
+              <div style={{ position: "relative" }}>
+                <button
+                  onClick={() => setShowMenu((prev) => !prev)}
+                  style={menuButtonStyle}
+                >
+                  ⋮
+                </button>
+
+                {showMenu ? (
+                  <div style={menuDropdownStyle}>
+                    <a
+                      href="/airport/review"
+                      style={menuItemStyle}
+                      onClick={() => setShowMenu(false)}
+                    >
+                      Transit Review Dashboard
+                    </a>
+
+                    <a
+                      href="/airport/review/history"
+                      style={menuItemStyle}
+                      onClick={() => setShowMenu(false)}
+                    >
+                      Review Storage
+                    </a>
+                  </div>
+                ) : null}
+              </div>
+            </div>
           </div>
         </section>
 
@@ -200,11 +168,12 @@ const [actionMessage, setActionMessage] = useState("");
             <input
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="Paste token or full transit pass URL"
+              placeholder="Paste airport-result token or full transit pass URL"
               style={inputStyle}
             />
+
             <button
-              onClick={verifyNow}
+              onClick={scanNow}
               disabled={loading || !token.trim()}
               style={{
                 ...buttonStyle,
@@ -212,48 +181,47 @@ const [actionMessage, setActionMessage] = useState("");
                 cursor: loading || !token.trim() ? "not-allowed" : "pointer",
               }}
             >
-              {loading ? "Verifying..." : "Verify Pass"}
+              {loading ? "Scanning..." : "Scan Now"}
             </button>
           </div>
 
           <p style={hintStyle}>
-            Example: berries-transit-1773675828035-pk8g79g0
+            Scanner reads the token and connects it directly to the stored transit
+            pass.
           </p>
-          {actionMessage ? (
-  <p
-    style={{
-      marginTop: 10,
-      color: "#374151",
-      fontSize: 14,
-      fontWeight: 700,
-    }}
-  >
-    {actionMessage}
-  </p>
-) : null}
         </section>
 
         {result ? (
           <section style={panelStyle}>
-            <h2 style={sectionTitleStyle}>Verification Result</h2>
+            <h2 style={sectionTitleStyle}>Scan Result</h2>
 
             {!result.ok ? (
-              <div style={errorBoxStyle}>
-                {result.error || "Something went wrong."}
+              <div style={errorBannerStyle}>
+                <div style={bannerTitleStyle}>SCAN ERROR</div>
+                <div style={bannerTextStyle}>
+                  {result.error || "Something went wrong."}
+                </div>
               </div>
             ) : (
               <>
-                <div
-                  style={
-                    result.verified ? verifiedBannerStyle : rejectedBannerStyle
-                  }
-                >
-                  <div style={{ fontSize: 24, fontWeight: 900 }}>
-                    {result.verified ? "PASS VERIFIED" : "PASS REQUIRES REVIEW"}
+                <div style={resultBannerStyle}>
+                  <div style={bannerTitleStyle}>
+                    {result.verified ? "PASS CLEARED" : "HOLD FOR OFFICER"}
                   </div>
-                  <div style={{ marginTop: 8, fontSize: 16 }}>
-                    {result.message}
+                  <div style={bannerTextStyle}>
+                    {result.message || "No result message."}
                   </div>
+
+                  {!result.verified ? (
+                    <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      <a href="/airport/review" style={quickLinkButtonStyle}>
+                        Open Transit Review Dashboard
+                      </a>
+                      <a href="/airport/review/history" style={quickLinkButtonStyle}>
+                        Open Review Storage
+                      </a>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div style={gridStyle}>
@@ -276,22 +244,17 @@ const [actionMessage, setActionMessage] = useState("");
                         .join(" • ") || "Not added"}
                     </div>
                     <div style={cardSubStyle}>
-                      Hotel: {result.trip?.hotel_name || "Not added"}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={gridStyle}>
-                  <div style={cardStyle}>
-                    <div style={cardLabelStyle}>Pass Token</div>
-                    <div style={tokenStyle}>{result.token}</div>
-                    <div style={cardSubStyle}>
                       Total scans: {result.total_scans ?? 0}
                     </div>
                   </div>
 
                   <div style={cardStyle}>
-                    <div style={cardLabelStyle}>Pass Status</div>
+                    <div style={cardLabelStyle}>Pass Token</div>
+                    <div style={tokenStyle}>{result.token ?? "No token"}</div>
+                  </div>
+
+                  <div style={cardStyle}>
+                    <div style={cardLabelStyle}>Pass State</div>
                     <div style={cardMainStyle}>
                       {result.pass?.is_active ? "Active" : "Inactive"}
                     </div>
@@ -305,7 +268,7 @@ const [actionMessage, setActionMessage] = useState("");
                 </div>
 
                 <div style={{ marginTop: 24 }}>
-                  <h3 style={subTitleStyle}>Travel Readiness</h3>
+                  <h3 style={subTitleStyle}>Boarding Checks</h3>
 
                   <div style={checkGridStyle}>
                     <CheckItem
@@ -325,75 +288,36 @@ const [actionMessage, setActionMessage] = useState("");
                   </div>
                 </div>
 
-                <div style={{ marginTop: 24 }}>
-                  <h3 style={subTitleStyle}>Linked Documents</h3>
+                {result.request ? (
+                  <div style={{ marginTop: 24 }}>
+                    <h3 style={subTitleStyle}>Airport Decision</h3>
 
-                  {!result.documents || result.documents.length === 0 ? (
-  <div style={emptyStyle}>No linked documents found.</div>
-) : (
-  <div style={docListStyle}>
-    {result.documents.map((doc) => (
-      <div key={doc.id} style={docCardStyle}>
-        <div>
-          <div style={docTitleStyle}>
-            {(doc.document_type ?? "document").replace("_", " ")}
-          </div>
-          <div style={docFileStyle}>
-            {doc.file_name ?? "Unnamed file"}
-          </div>
-          <div
-            style={{
-              ...docVerifyStyle,
-              color: doc.verified ? "#166534" : "#b45309",
-            }}
-          >
-            {doc.verified ? "Verified" : "Pending verification"}
-          </div>
-        </div>
+                    <div style={decisionCardStyle}>
+                      <div style={decisionRowStyle}>
+                        <span style={decisionLabelStyle}>Request status</span>
+                        <span style={decisionValueStyle}>
+                          {result.request.request_status ?? "Unknown"}
+                        </span>
+                      </div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            flexWrap: "wrap",
-            justifyContent: "flex-end",
-          }}
-        >
-          <button
-            onClick={() => updateDocumentStatus(doc.id, true)}
-            disabled={updatingDocId === doc.id}
-            style={{
-              ...miniButtonStyle,
-              background: "#dcfce7",
-              color: "#166534",
-              border: "1px solid #86efac",
-              cursor: updatingDocId === doc.id ? "not-allowed" : "pointer",
-              opacity: updatingDocId === doc.id ? 0.7 : 1,
-            }}
-          >
-            {updatingDocId === doc.id ? "Updating..." : "Verify"}
-          </button>
+                      <div style={decisionRowStyle}>
+                        <span style={decisionLabelStyle}>Pass status</span>
+                        <span style={decisionValueStyle}>
+                          {result.request.pass_status ?? "Unknown"}
+                        </span>
+                      </div>
 
-          <button
-            onClick={() => updateDocumentStatus(doc.id, false)}
-            disabled={updatingDocId === doc.id}
-            style={{
-              ...miniButtonStyle,
-              background: "#fff7ed",
-              color: "#9a3412",
-              border: "1px solid #fdba74",
-              cursor: updatingDocId === doc.id ? "not-allowed" : "pointer",
-              opacity: updatingDocId === doc.id ? 0.7 : 1,
-            }}
-          >
-            {updatingDocId === doc.id ? "Updating..." : "Mark Pending"}
-          </button>
-        </div>
-      </div>
-    ))}
-  </div>
-)}
-                </div>
+                      {result.request.airport_note ? (
+                        <div style={{ ...decisionRowStyle, alignItems: "flex-start" }}>
+                          <span style={decisionLabelStyle}>Airport note</span>
+                          <span style={decisionValueStyle}>
+                            {result.request.airport_note}
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
               </>
             )}
           </section>
@@ -414,9 +338,9 @@ function CheckItem({
     <div
       style={{
         ...checkItemStyle,
-        borderColor: ok ? "#86efac" : "#fcd34d",
-        background: ok ? "#f0fdf4" : "#fffbeb",
-        color: ok ? "#166534" : "#92400e",
+        borderColor: ok ? "#86efac" : "#fdba74",
+        background: ok ? "#f0fdf4" : "#fff7ed",
+        color: ok ? "#166534" : "#9a3412",
       }}
     >
       <span>{ok ? "✔" : "✖"}</span>
@@ -447,7 +371,7 @@ const heroStyle: React.CSSProperties = {
   boxShadow: "0 20px 60px rgba(0,0,0,0.18)",
 };
 
-const heroTopRowStyle: React.CSSProperties = {
+const heroRowStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "flex-start",
@@ -474,10 +398,10 @@ const heroTextStyle: React.CSSProperties = {
   fontSize: 17,
   lineHeight: 1.6,
   opacity: 0.95,
-  maxWidth: 720,
+  maxWidth: 760,
 };
 
-const statusNeutralStyle: React.CSSProperties = {
+const readyPillStyle: React.CSSProperties = {
   display: "inline-block",
   padding: "12px 18px",
   borderRadius: 999,
@@ -488,18 +412,59 @@ const statusNeutralStyle: React.CSSProperties = {
   letterSpacing: 1,
 };
 
-const statusGoodStyle: React.CSSProperties = {
-  ...statusNeutralStyle,
+const successPillStyle: React.CSSProperties = {
+  ...readyPillStyle,
   background: "#dcfce7",
   color: "#166534",
   border: "1px solid #86efac",
 };
 
-const statusBadStyle: React.CSSProperties = {
-  ...statusNeutralStyle,
+const holdPillStyle: React.CSSProperties = {
+  ...readyPillStyle,
+  background: "#fff7ed",
+  color: "#9a3412",
+  border: "1px solid #fdba74",
+};
+
+const errorPillStyle: React.CSSProperties = {
+  ...readyPillStyle,
   background: "#fef2f2",
   color: "#991b1b",
   border: "1px solid #fca5a5",
+};
+
+const menuButtonStyle: React.CSSProperties = {
+  width: 44,
+  height: 44,
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.28)",
+  background: "rgba(255,255,255,0.12)",
+  color: "#fff",
+  fontSize: 22,
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const menuDropdownStyle: React.CSSProperties = {
+  position: "absolute",
+  right: 0,
+  top: 52,
+  minWidth: 230,
+  borderRadius: 14,
+  background: "#fff",
+  border: "1px solid #e5e7eb",
+  boxShadow: "0 20px 40px rgba(15,23,42,0.15)",
+  overflow: "hidden",
+  zIndex: 30,
+};
+
+const menuItemStyle: React.CSSProperties = {
+  display: "block",
+  padding: "12px 14px",
+  color: "#111827",
+  textDecoration: "none",
+  fontWeight: 800,
+  borderBottom: "1px solid #f1f5f9",
 };
 
 const panelStyle: React.CSSProperties = {
@@ -553,17 +518,16 @@ const hintStyle: React.CSSProperties = {
   fontSize: 13,
 };
 
-const errorBoxStyle: React.CSSProperties = {
+const neutralBannerStyle: React.CSSProperties = {
   marginTop: 18,
-  padding: 16,
-  borderRadius: 16,
-  background: "#fef2f2",
-  border: "1px solid #fecaca",
-  color: "#991b1b",
-  fontWeight: 700,
+  padding: 20,
+  borderRadius: 20,
+  background: "#f9fafb",
+  border: "1px solid #e5e7eb",
+  color: "#111827",
 };
 
-const verifiedBannerStyle: React.CSSProperties = {
+const successBannerStyle: React.CSSProperties = {
   marginTop: 18,
   padding: 20,
   borderRadius: 20,
@@ -572,13 +536,43 @@ const verifiedBannerStyle: React.CSSProperties = {
   color: "#166534",
 };
 
-const rejectedBannerStyle: React.CSSProperties = {
+const holdBannerStyle: React.CSSProperties = {
   marginTop: 18,
   padding: 20,
   borderRadius: 20,
   background: "#fff7ed",
   border: "1px solid #fdba74",
   color: "#9a3412",
+};
+
+const errorBannerStyle: React.CSSProperties = {
+  marginTop: 18,
+  padding: 20,
+  borderRadius: 20,
+  background: "#fef2f2",
+  border: "1px solid #fecaca",
+  color: "#991b1b",
+};
+
+const bannerTitleStyle: React.CSSProperties = {
+  fontSize: 24,
+  fontWeight: 900,
+};
+
+const bannerTextStyle: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 16,
+};
+
+const quickLinkButtonStyle: React.CSSProperties = {
+  display: "inline-block",
+  background: "#fff",
+  color: "#111827",
+  padding: "10px 14px",
+  borderRadius: 12,
+  textDecoration: "none",
+  fontWeight: 800,
+  border: "1px solid rgba(17,24,39,0.08)",
 };
 
 const gridStyle: React.CSSProperties = {
@@ -643,53 +637,31 @@ const checkItemStyle: React.CSSProperties = {
   fontSize: 16,
 };
 
-const docListStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 12,
+const decisionCardStyle: React.CSSProperties = {
   marginTop: 14,
-};
-
-const docCardStyle: React.CSSProperties = {
   borderRadius: 16,
   border: "1px solid #e5e7eb",
   background: "#fafafa",
   padding: 16,
 };
 
-const docTitleStyle: React.CSSProperties = {
-  fontWeight: 900,
-  color: "#111827",
-  textTransform: "capitalize",
+const decisionRowStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: 16,
+  padding: "10px 0",
+  borderBottom: "1px solid #e5e7eb",
 };
 
-const docFileStyle: React.CSSProperties = {
-  marginTop: 6,
-  color: "#6b7280",
-  fontSize: 14,
-};
-
-const docVerifyStyle: React.CSSProperties = {
-  marginTop: 8,
-  fontSize: 13,
+const decisionLabelStyle: React.CSSProperties = {
   fontWeight: 800,
+  color: "#374151",
 };
 
-const miniButtonStyle: React.CSSProperties = {
-  height: 40,
-  borderRadius: 12,
-  padding: "0 14px",
-  fontSize: 13,
-  fontWeight: 900,
-  border: "1px solid",
-};
-
-const emptyStyle: React.CSSProperties = {
-  marginTop: 14,
-  padding: 16,
-  borderRadius: 14,
-  background: "#f9fafb",
-  border: "1px solid #e5e7eb",
-  color: "#6b7280",
+const decisionValueStyle: React.CSSProperties = {
+  fontWeight: 700,
+  color: "#111827",
+  textAlign: "right",
 };
 
 const tokenStyle: React.CSSProperties = {

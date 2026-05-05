@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const fetchCache = "force-no-store";
+
 import React from "react";
 import { supabase } from "@/lib/supabase";
 
@@ -34,6 +38,17 @@ type PassRow = {
   trip?: Trip | Trip[] | null;
 };
 
+type TransitPassRequest = {
+  id: string;
+  trip_id: string | null;
+  qr_pass_id: string | null;
+  request_status: string | null;
+  pass_status: string | null;
+  airport_note: string | null;
+  approved_at: string | null;
+  rejected_at: string | null;
+};
+
 function normalizeToken(value: string | null | undefined) {
   if (!value) return null;
   const trimmed = value.trim();
@@ -50,6 +65,44 @@ function getSafeTrip(passRow: PassRow | null): Trip | null {
   if (!passRow?.trip) return null;
   if (Array.isArray(passRow.trip)) return passRow.trip[0] ?? null;
   return passRow.trip;
+}
+
+async function approvePass(formData: FormData) {
+  "use server";
+
+  const requestId = String(formData.get("request_id") ?? "");
+  if (!requestId) return;
+
+  await supabase
+    .from("transit_pass_requests")
+    .update({
+      request_status: "approved",
+      pass_status: "granted",
+      approved_at: new Date().toISOString(),
+      reviewed_at: new Date().toISOString(),
+      airport_note: "Approved for travel.",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", requestId);
+}
+
+async function rejectPass(formData: FormData) {
+  "use server";
+
+  const requestId = String(formData.get("request_id") ?? "");
+  if (!requestId) return;
+
+  await supabase
+    .from("transit_pass_requests")
+    .update({
+      request_status: "rejected",
+      pass_status: "revoked",
+      rejected_at: new Date().toISOString(),
+      reviewed_at: new Date().toISOString(),
+      airport_note: "Documents not valid or incomplete.",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", requestId);
 }
 
 export default async function TransitPassPage({
@@ -89,7 +142,7 @@ export default async function TransitPassPage({
     );
   }
 
-  const { data: passRowRaw, error: passError } = await supabase
+  const { data: passRowsRaw, error: passError } = await supabase
     .from("transit_qr_passes")
     .select(`
       id,
@@ -108,10 +161,13 @@ export default async function TransitPassPage({
         hotel_name
       )
     `)
-    .eq("qr_code_value", token)
-    .single();
+    .eq("is_active", true)
+    .order("created_at", { ascending: false });
 
-  const passRow = (passRowRaw ?? null) as PassRow | null;
+  const passRow =
+    ((passRowsRaw ?? []).find(
+      (row: any) => normalizeToken(row.qr_code_value) === token
+    ) as PassRow | undefined) ?? null;
 
   const isExpired =
     !!passRow?.expires_at &&
@@ -152,7 +208,8 @@ export default async function TransitPassPage({
     scan_mode: scanMode,
     note: isAirportMode
       ? "Transit pass opened from airport scanner mode"
-      : "Transit pass opened from QR verification page",
+      : "Transit pass opened from passenger pass page",
+    scanned_at: new Date().toISOString(),
   });
 
   const { count: scanCount } = await supabase
@@ -165,14 +222,35 @@ export default async function TransitPassPage({
   const docsRes = await supabase
     .from("transit_documents")
     .select("id, document_type, file_name, verified, trip_id")
-    .eq("trip_id", String(passRow.trip_id))
+    .eq("trip_id", passRow.trip_id)
     .order("created_at", { ascending: false });
 
   const documents = (docsRes.data ?? []) as TransitDocument[];
 
-  console.log("PASS ROW:", passRow);
-  console.log("SAFE TRIP:", safeTrip);
-  console.log("DOCS LOOKUP RESULT:", docsRes.data);
+  let currentRequest: TransitPassRequest | null = null;
+
+  const exactRequestRes = await supabase
+    .from("transit_pass_requests")
+    .select("*")
+    .eq("qr_pass_id", passRow.id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  currentRequest =
+    ((exactRequestRes.data ?? [])[0] as TransitPassRequest | undefined) ?? null;
+
+  if (!currentRequest && passRow.trip_id) {
+    const fallbackRequestRes = await supabase
+      .from("transit_pass_requests")
+      .select("*")
+      .eq("trip_id", String(passRow.trip_id))
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    currentRequest =
+      ((fallbackRequestRes.data ?? [])[0] as TransitPassRequest | undefined) ??
+      null;
+  }
 
   const hasVerifiedType = (type: string) =>
     documents.some(
@@ -201,43 +279,71 @@ export default async function TransitPassPage({
   };
 
   const hasMinimumVerified =
-    readiness.passport &&
-    readiness.ticket &&
-    readiness.hotel_booking;
+    readiness.passport && readiness.ticket && readiness.hotel_booking;
 
   const hasMinimumUploaded =
-    presence.passport &&
-    presence.ticket &&
-    presence.hotel_booking;
+    presence.passport && presence.ticket && presence.hotel_booking;
 
-  const overallStatus: "GREEN" | "RED" | "REVIEW" = isExpired
-    ? "RED"
-    : hasMinimumVerified
-    ? "GREEN"
-    : hasMinimumUploaded
-    ? "REVIEW"
-    : "RED";
+  const airportGranted =
+    currentRequest?.pass_status === "granted" ||
+    currentRequest?.request_status === "approved";
 
-  const statusTitle =
-    overallStatus === "GREEN"
-      ? "CLEARED FOR TRAVEL"
-      : overallStatus === "RED"
-      ? "ENTRY DENIED"
-      : "MANUAL REVIEW REQUIRED";
+  const airportRejected =
+    currentRequest?.pass_status === "revoked" ||
+    currentRequest?.request_status === "rejected";
 
-  const headerTitle =
-    overallStatus === "GREEN"
-      ? "Transit Pass Verified"
-      : overallStatus === "RED"
-      ? "Transit Pass Rejected"
-      : "Transit Pass Pending Review";
+  const airportPending =
+    currentRequest?.request_status === "pending_review" ||
+    currentRequest?.request_status === "under_review";
 
-  const statusSubtitle =
-    overallStatus === "GREEN"
-      ? "Passenger meets travel requirements."
-      : overallStatus === "RED"
-      ? "Critical travel documents are missing."
-      : "Documents require officer verification.";
+  let overallStatus: "GREEN" | "RED" | "REVIEW" = "REVIEW";
+  let statusTitle = "";
+  let headerTitle = "";
+  let statusSubtitle = "";
+
+  if (isExpired) {
+    overallStatus = "RED";
+    headerTitle = "Transit Pass Expired";
+    statusTitle = "PASS EXPIRED";
+    statusSubtitle = "This transit pass has expired.";
+  } else if (airportGranted) {
+    overallStatus = "GREEN";
+    headerTitle = "Transit Pass Granted";
+    statusTitle = "CLEARED FOR TRAVEL";
+    statusSubtitle =
+      currentRequest?.airport_note ||
+      "Airport has approved your request. You may continue with travel.";
+  } else if (airportRejected) {
+    overallStatus = "RED";
+    headerTitle = "Transit Pass Rejected";
+    statusTitle = "ENTRY DENIED";
+    statusSubtitle =
+      currentRequest?.airport_note ||
+      "Airport review rejected this transit request.";
+  } else if (airportPending) {
+    overallStatus = "REVIEW";
+    headerTitle = "Transit Pass Pending Review";
+    statusTitle = "AIRPORT REVIEW IN PROGRESS";
+    statusSubtitle =
+      currentRequest?.request_status === "under_review"
+        ? "Airport staff are reviewing your submitted documents."
+        : "Your request has been submitted and is waiting for airport review.";
+  } else if (hasMinimumVerified) {
+    overallStatus = "GREEN";
+    headerTitle = "Transit Pass Verified";
+    statusTitle = "CLEARED FOR TRAVEL";
+    statusSubtitle = "Passenger meets travel requirements.";
+  } else if (hasMinimumUploaded) {
+    overallStatus = "REVIEW";
+    headerTitle = "Transit Pass Pending Review";
+    statusTitle = "MANUAL REVIEW REQUIRED";
+    statusSubtitle = "Documents were uploaded and still require review.";
+  } else {
+    overallStatus = "RED";
+    headerTitle = "Transit Pass Rejected";
+    statusTitle = "ENTRY DENIED";
+    statusSubtitle = "Critical travel documents are missing.";
+  }
 
   const heroBadgeStyle =
     overallStatus === "GREEN"
@@ -327,10 +433,60 @@ export default async function TransitPassPage({
               <ChecklistItem label="Passport" ok={readiness.passport} />
               <ChecklistItem label="Visa" ok={readiness.visa} />
               <ChecklistItem label="Ticket" ok={readiness.ticket} />
-              <ChecklistItem label="Hotel booking" ok={readiness.hotel_booking} />
-              <ChecklistItem label="Vaccination" ok={readiness.vaccination} />
+              <ChecklistItem
+                label="Hotel booking"
+                ok={readiness.hotel_booking}
+              />
+              <ChecklistItem
+                label="Vaccination"
+                ok={readiness.vaccination}
+              />
             </div>
           </section>
+
+          {isAirportMode && currentRequest && (
+            <section style={{ padding: "0 24px 24px" }}>
+              <div style={sectionTitleStyle}>Airport actions</div>
+
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                <form action={approvePass}>
+                  <input type="hidden" name="request_id" value={currentRequest.id} />
+                  <button
+                    type="submit"
+                    style={{
+                      background: "#16a34a",
+                      color: "#fff",
+                      padding: "12px 18px",
+                      borderRadius: 10,
+                      border: "none",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ✅ Approve & Grant Pass
+                  </button>
+                </form>
+
+                <form action={rejectPass}>
+                  <input type="hidden" name="request_id" value={currentRequest.id} />
+                  <button
+                    type="submit"
+                    style={{
+                      background: "#dc2626",
+                      color: "#fff",
+                      padding: "12px 18px",
+                      borderRadius: 10,
+                      border: "none",
+                      fontWeight: 900,
+                      cursor: "pointer",
+                    }}
+                  >
+                    ❌ Reject
+                  </button>
+                </form>
+              </div>
+            </section>
+          )}
 
           <section style={sectionStyle}>
             <div style={sectionTitleStyle}>Documents linked to this trip</div>
@@ -383,6 +539,17 @@ export default async function TransitPassPage({
                 </div>
 
                 <div style={tokenMetaItemStyle}>Status: {overallStatus}</div>
+
+                {currentRequest ? (
+                  <>
+                    <div style={tokenMetaItemStyle}>
+                      Request status: {currentRequest.request_status ?? "unknown"}
+                    </div>
+                    <div style={tokenMetaItemStyle}>
+                      Pass status: {currentRequest.pass_status ?? "unknown"}
+                    </div>
+                  </>
+                ) : null}
               </div>
             </div>
           </section>
