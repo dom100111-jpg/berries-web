@@ -1,33 +1,51 @@
 import { createClient } from "@supabase/supabase-js";
 
 type PageProps = {
-  searchParams?: Promise<Record<string, string | string[] | undefined>> | Record<string, string | string[] | undefined>;
+  searchParams?:
+    | Promise<Record<string, string | string[] | undefined>>
+    | Record<string, string | string[] | undefined>;
 };
 
 function getSingle(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-async function creditWallet(paymentId: string) {
-  const supabaseUrl = process.env.SUPABASE_URL!;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+async function creditWallet(params: Record<string, string | string[] | undefined>) {
+  const supabaseUrl =
+    process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl) throw new Error("Supabase URL is missing.");
+  if (!serviceRoleKey) throw new Error("Service role key is missing.");
 
   const admin = createClient(supabaseUrl, serviceRoleKey);
 
-  const { data: payment, error: paymentError } = await admin
-    .from("payments")
-    .select("*")
-    .eq("id", paymentId)
-    .maybeSingle();
+  const paymentIdFromUrl = getSingle(params.payment_id);
+  const sessionIdFromUrl = getSingle(params.session_id);
+
+  let paymentQuery = admin.from("payments").select("*");
+
+  if (paymentIdFromUrl) {
+    paymentQuery = paymentQuery.eq("id", paymentIdFromUrl);
+  } else if (sessionIdFromUrl) {
+    paymentQuery = paymentQuery.eq("stripe_session_id", sessionIdFromUrl);
+  } else {
+    throw new Error("Missing payment ID.");
+  }
+
+  const { data: payment, error: paymentError } = await paymentQuery.maybeSingle();
 
   if (paymentError) throw paymentError;
   if (!payment) throw new Error("Payment not found.");
+
+  const paymentId = payment.id;
 
   await admin
     .from("payments")
     .update({
       payment_status: "paid",
-      paid_at: new Date().toISOString(),
+      paid_at: payment.paid_at || new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
     .eq("id", paymentId);
@@ -46,7 +64,9 @@ async function creditWallet(paymentId: string) {
   const amount = Number(payment.amount || 0);
   const currency = payment.currency || "SZL";
 
-  if (!receiverCompanyId || amount <= 0) return;
+  if (!receiverCompanyId || amount <= 0) {
+    return "Payment marked paid, but no receiver company was found.";
+  }
 
   const { data: existingTx } = await admin
     .from("company_wallet_transactions")
@@ -55,7 +75,9 @@ async function creditWallet(paymentId: string) {
     .eq("transaction_type", "sale_income")
     .maybeSingle();
 
-  if (existingTx?.id) return;
+  if (existingTx?.id) {
+    return "Payment already added to wallet.";
+  }
 
   const { data: existingWallet, error: walletFindError } = await admin
     .from("company_wallets")
@@ -68,16 +90,12 @@ async function creditWallet(paymentId: string) {
   let walletId = existingWallet?.id;
 
   if (walletId) {
-    const nextAvailable = Number(existingWallet.available_balance || 0) + amount;
-    const nextBalance = Number(existingWallet.balance || 0) + amount;
-    const nextReceived = Number(existingWallet.total_received || 0) + amount;
-
     const { error: walletUpdateError } = await admin
       .from("company_wallets")
       .update({
-        balance: nextBalance,
-        available_balance: nextAvailable,
-        total_received: nextReceived,
+        balance: Number(existingWallet.balance || 0) + amount,
+        available_balance: Number(existingWallet.available_balance || 0) + amount,
+        total_received: Number(existingWallet.total_received || 0) + amount,
         currency,
         updated_at: new Date().toISOString(),
       })
@@ -118,17 +136,17 @@ async function creditWallet(paymentId: string) {
     });
 
   if (txError) throw txError;
+
+  return "Payment completed and wallet updated. You can now go back to the Berries app.";
 }
 
 export default async function PaymentSuccessPage({ searchParams }: PageProps) {
-  const params = await searchParams;
-  const paymentId = getSingle(params?.payment_id);
+  const params = (await searchParams) || {};
 
   let message = "Your payment was completed. You can now go back to the Berries app.";
 
   try {
-    if (!paymentId) throw new Error("Missing payment ID.");
-    await creditWallet(paymentId);
+    message = await creditWallet(params);
   } catch (err: any) {
     message = err?.message || "Payment completed, but wallet sync failed.";
   }
