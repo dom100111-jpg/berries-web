@@ -152,9 +152,14 @@ export default async function PaymentSuccessPage({ searchParams }: PageProps) {
   }
 
   return (
-    <main style={{ padding: 30, fontFamily: "Arial" }}>
-      <h1>Payment Successful ✅</h1>
-      <p>{message}</p>
-    </main>
-  );
+  <main style={{ padding: 30, fontFamily: "Arial" }}>
+    <h1>Payment Successful ✅</h1>
+
+    <pre>
+      {JSON.stringify(params, null, 2)}
+    </pre>
+
+    <p>{message}</p>
+  </main>
+);
 }
